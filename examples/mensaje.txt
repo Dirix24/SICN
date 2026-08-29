@@ -1,0 +1,16 @@
+# Ejemplo conceptual
+
+Mensaje original:
+Hola Carlos, este mensaje es privado.
+
+↓ CIFRADO
+
+[DATOS CIFRADOS]
+
+↓ SERVIDOR
+
+[DATOS CIFRADOS]
+
+↓ DESCIFRADO LOCAL
+
+Hola Carlos, este mensaje es privado.
