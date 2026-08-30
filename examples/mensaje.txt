@@ -1,16 +1,22 @@
-# Ejemplo conceptual
+Ejemplo real de salida de `python examples/demo.py`
+(no es un diagrama conceptual: es la salida real de la implementación).
 
-Mensaje original:
-Hola Carlos, este mensaje es privado.
+Alice — huella digital: f4af eb97 5999 1b9f 31b7 bc20 6644 c9fb 3bb1 c6ad 1887 3a2f af30 e5b3 9835 bcae
+Bob   — huella digital: 04f5 7880 e43b 2fa3 11ee de37 a5af 1408 087e 099c 7731 e29c 3c66 c8e2 12f9 0579
 
-↓ CIFRADO
+Mensaje original: Hola Bob, este mensaje es privado.
 
-[DATOS CIFRADOS]
+Sobre cifrado (esto es lo único que vería un servidor o un fisgón):
+  ciphertext (base64): 9Fufef+Gg3OfedWcm5Her7Mo2UxngU1bnrph4Abka04fzgiM0Om6PnJ6GJOE...
+  firmado por (huella): f4af eb97 5999 1b9f 31b7 bc20 6644 c9fb 3bb1 c6ad 1887 3a2f af30 e5b3 9835 bcae
 
-↓ SERVIDOR
+Bob descifra y verifica: Hola Bob, este mensaje es privado.
 
-[DATOS CIFRADOS]
+✅ El mensaje llegó íntegro y autenticado.
 
-↓ DESCIFRADO LOCAL
+---
 
-Hola Carlos, este mensaje es privado.
+Nota: las huellas digitales y el ciphertext son distintos en cada
+ejecución (se generan identidades y claves efímeras nuevas cada vez).
+Ejecuta tú mismo `python examples/demo.py` para verlo con tus propios
+datos.

@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
 .env
 .env.*
 .vscode/
@@ -15,3 +16,10 @@ target/
 *.pem
 *.secret
 .DS_Store
+
+# Datos locales de identidad/claves y bases de datos del servidor:
+# nunca deben subirse al repositorio.
+*.db
+*.enc
+sicn_data*/
+*_data/
