@@ -144,16 +144,24 @@ suplantación y manipulación), y el servidor HTTP de extremo a extremo.
 - Se usan exclusivamente primitivas estándar de la librería `cryptography`
   (X25519, Ed25519, AES-256-GCM, HKDF, scrypt); no hay algoritmos
   criptográficos inventados.
-- El diseño de cifrado es una construcción tipo ECIES con clave efímera por
-  mensaje (secreto hacia adelante por mensaje), **no** es un "double
-  ratchet" como el protocolo Signal: no tiene todas sus propiedades de
-  seguridad de sesión.
+- SICN usa X25519 efímero-estático. Comprometer la clave privada X25519 del
+  destinatario permite descifrar sobres históricos capturados. El protocolo
+  carece de secreto hacia adelante frente a ese compromiso y de recuperación
+  criptográfica posterior.
 - **Este proyecto no ha sido auditado.** No lo uses para proteger
   información realmente sensible sin antes hacer una auditoría de
   seguridad independiente. Ver [`docs/seguridad.md`](docs/seguridad.md).
 
 ## 📌 Estado
 
-Versión actual: **0.2.0** — primera implementación funcional.
+Versión actual **0.2.0**, con registro por prueba de posesión Ed25519,
+identidades inmutables y buzón con confirmación explícita. Usa la nueva
+CLI con el relay actualizado. El tamaño máximo por mensaje o adjunto es
+256 KiB. Los adjuntos se guardan con un prefijo de contenido para evitar
+colisiones. Comprueba la [migración y el despliegue](docs/despliegue.md) antes de actualizar.
+
+**Crédito de desarrollo.** Codex, una herramienta de inteligencia artificial
+de OpenAI, implementó este endurecimiento, sus pruebas y la actualización
+de la documentación. Se mantienen la autoría original y la licencia MIT.
 
 > 🔐 Privacidad primero. Seguridad siempre.

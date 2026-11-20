@@ -17,14 +17,18 @@ Ejemplos:
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import os
 import sys
+from urllib.parse import urlsplit
 
 import requests
 
+from ..core.auth import canonical, check_bundle, context, proof_bytes
+from .local import persist
 from ..core.contacts import add_contact, load_contacts
-from ..core.envelope import Envelope, TamperedMessageError, open_message, seal_message
+from ..core.envelope import MAX_PLAINTEXT, Envelope, TamperedMessageError, open_message, seal_message
 from ..crypto.keys import (
     Identity,
     PublicBundle,
@@ -76,22 +80,34 @@ def cmd_whoami(args: argparse.Namespace) -> None:
     print(f"Huella digital: {pretty_fingerprint(identity.fingerprint)}")
 
 
+def request(method, server, path, **kwargs):
+    response = requests.request(method, server.rstrip("/") + path, timeout=10, allow_redirects=False, **kwargs)
+    if response.is_redirect:
+        raise ValueError("El servidor intentó redirigir la solicitud")
+    response.raise_for_status()
+    return response.json()
+
+
+def proof(server, identity, operation, payload):
+    expected = {"fingerprint": identity.fingerprint, "operation": operation, "context": context(payload)}
+    challenge = request("POST", server, "/challenge", json=expected)
+    if set(challenge) != {*expected, "nonce", "audience", "expires_at"} or any(
+        challenge[k] != v for k, v in expected.items()
+    ):
+        raise ValueError("El desafío no corresponde a la operación solicitada")
+    signature = identity.ed25519_private.sign(proof_bytes(challenge))
+    return {"nonce": challenge["nonce"], "signature": base64.b64encode(signature).decode("ascii")}
+
+
 def cmd_register(args: argparse.Namespace) -> None:
     paths = _paths(args.data_dir)
     passphrase = _ask_passphrase()
     identity = load_identity(paths["identity"], passphrase)
     bundle = identity.public_bundle()
-    resp = requests.post(
-        f"{args.server}/register",
-        json={
-            "fingerprint": bundle.fingerprint,
-            "name": bundle.name,
-            "x25519_public": bundle.x25519_public,
-            "ed25519_public": bundle.ed25519_public,
-        },
-        timeout=10,
-    )
-    resp.raise_for_status()
+    payload = bundle.to_dict()
+    request("POST", args.server, "/register", json={
+        **payload, "proof": proof(args.server, identity, "register", payload),
+    })
     print(f"Registrado en {args.server}. Huella digital: {pretty_fingerprint(bundle.fingerprint)}")
 
 
@@ -103,9 +119,7 @@ def cmd_add_contact(args: argparse.Namespace) -> None:
             print("Necesitas --server para buscar la clave en el directorio.", file=sys.stderr)
             sys.exit(1)
         fp_clean = args.fetch_fingerprint.replace(" ", "")
-        resp = requests.get(f"{args.server}/keys/{fp_clean}", timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        data = request("GET", args.server, f"/keys/{fp_clean}")
         bundle = PublicBundle(
             name=args.nombre or data["name"],
             fingerprint=fp_clean,
@@ -126,6 +140,7 @@ def cmd_add_contact(args: argparse.Namespace) -> None:
             ed25519_public=args.ed25519,
         )
 
+    check_bundle(bundle)
     add_contact(paths["contacts"], args.nombre, bundle)
     print(f"Contacto '{args.nombre}' guardado. Verifica su huella digital antes de confiar en ella:")
     print(f"  {pretty_fingerprint(bundle.fingerprint)}")
@@ -145,7 +160,7 @@ def cmd_send(args: argparse.Namespace) -> None:
     filename = None
     if args.archivo:
         with open(args.archivo, "rb") as f:
-            plaintext = f.read()
+            plaintext = f.read(MAX_PLAINTEXT + 1)
         filename = os.path.basename(args.archivo)
     else:
         if args.mensaje is None:
@@ -155,8 +170,7 @@ def cmd_send(args: argparse.Namespace) -> None:
 
     envelope = seal_message(identity, recipient, plaintext, filename=filename)
 
-    resp = requests.post(f"{args.server}/messages", json=envelope.to_dict(), timeout=10)
-    resp.raise_for_status()
+    request("POST", args.server, "/messages", json=envelope.to_dict())
     print(f"Mensaje cifrado y enviado a '{args.a}'.")
 
 
@@ -167,37 +181,38 @@ def cmd_inbox(args: argparse.Namespace) -> None:
     contacts = load_contacts(paths["contacts"])
     contacts_by_fp = {c.fingerprint: c for c in contacts.values()}
 
-    resp = requests.get(f"{args.server}/messages/{identity.fingerprint}", timeout=10)
-    resp.raise_for_status()
-    messages = resp.json()["messages"]
-
-    if not messages:
-        print("No hay mensajes nuevos.")
-        return
-
-    os.makedirs(paths["received"], exist_ok=True)
-    for raw in messages:
-        envelope = Envelope.from_dict(raw)
-        sender = contacts_by_fp.get(envelope.sender_fp)
-        if sender is None:
-            print(
-                f"[AVISO] Mensaje de una huella digital desconocida ({pretty_fingerprint(envelope.sender_fp)}); "
-                "no se puede verificar la firma. Añade el contacto para leerlo con garantías."
-            )
-            continue
-        try:
-            plaintext = open_message(identity, sender, envelope)
-        except TamperedMessageError as exc:
-            print(f"[ALERTA] Mensaje de '{sender.name}' rechazado: {exc}")
-            continue
-
-        if envelope.filename:
-            out_path = os.path.join(paths["received"], envelope.filename)
-            with open(out_path, "wb") as f:
-                f.write(plaintext)
-            print(f"[{envelope.timestamp}] Archivo de '{sender.name}' guardado en {out_path}")
-        else:
-            print(f"[{envelope.timestamp}] {sender.name}: {plaintext.decode('utf-8', errors='replace')}")
+    path = f"/messages/{identity.fingerprint}"
+    after = 0
+    while True:
+        body = {"after": after}
+        page = request("POST", args.server, path, json={**body, "proof": proof(args.server, identity, "inbox", body)})
+        if not page["messages"] and after == 0:
+            print("No hay mensajes nuevos.")
+        for item in page["messages"]:
+            raw = item["envelope"]
+            digest = context(raw)
+            persist(os.path.join(args.data_dir, "inbox"), digest + ".json", canonical(raw))
+            envelope = Envelope.from_dict(raw)
+            sender = contacts_by_fp.get(envelope.sender_fp)
+            if sender is None:
+                print("[AVISO] Remitente desconocido. Sobre guardado sin confirmar.")
+                continue
+            try:
+                plaintext = open_message(identity, sender, envelope)
+            except TamperedMessageError:
+                print("[ALERTA] Sobre no verificable. Se conserva sin confirmar.")
+                continue
+            if envelope.filename:
+                name = digest + "-" + envelope.filename
+                persist(paths["received"], name, plaintext)
+                print(f"Adjunto guardado: {name}")
+            else:
+                print(f"{sender.name}: {plaintext.decode('utf-8', errors='replace')}")
+            ack = {"id": item["id"]}
+            request("POST", args.server, path + "/ack", json={**ack, "proof": proof(args.server, identity, "ack", ack)})
+        after = page["next_after"]
+        if after is None:
+            break
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -242,7 +257,22 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    args.func(args)
+    try:
+        server = getattr(args, "server", None)
+        if server:
+            url = urlsplit(server)
+            if (not url.hostname or url.username or url.password or url.query or url.fragment
+                or (url.scheme != "https" and not (
+                    url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}
+                ))):
+                raise ValueError("Usa HTTPS, salvo HTTP hacia localhost")
+        args.func(args)
+    except requests.RequestException as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        parser.exit(1, f"Error de comunicación con el servidor (HTTP {status}).\n" if status
+                    else "No se pudo conectar con el servidor.\n")
+    except (ValueError, OSError) as exc:
+        parser.exit(1, f"Error: {exc}\n")
 
 
 if __name__ == "__main__":
