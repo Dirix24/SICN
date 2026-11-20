@@ -86,3 +86,30 @@ dispositivo/directorio de datos. Quedan como trabajo futuro (ver README).
 
 El campo `version` en el sobre permite introducir cambios incompatibles en
 el futuro sin romper la interoperabilidad con mensajes antiguos.
+
+## Autenticación del relay y entrega
+
+`POST /challenge` acepta `fingerprint`, `operation` y `context`. El contexto es
+SHA-256 hexadecimal del JSON canónico del cuerpo sin `proof`. Se ordenan las
+claves, se usan separadores compactos y escapes Unicode ASCII. Para registro
+se incluyen las dos claves y el nombre, para lectura el cursor `after` y
+para confirmación el `id`. Se firma el prefijo ASCII `SICN-RELAY-AUTH-v1`,
+un byte nulo y el JSON canónico del desafío completo. El desafío incluye
+nonce aleatorio, huella, operación, contexto, audiencia del relay y caducidad.
+El cliente envía `proof: {"nonce": "...", "signature": "..."}` con firma
+Ed25519 Base64. La ventana es de 60 segundos y consumir la prueba y ejecutar
+la operación son parte de la misma transacción SQLite.
+
+La lectura autenticada usa `POST /messages/{fingerprint}`. Cada página
+devuelve hasta diez entradas con `id` y `envelope`, y un cursor
+`next_after` cuando procede. Descargar no elimina nada. El cliente guarda
+el sobre cifrado, comprueba la firma y descifra. Confirma usando
+`POST /messages/{fingerprint}/ack`; el relay conserva un registro de ACK
+hasta que vence la retención. Reenviar exactamente el mismo sobre dentro
+de ese plazo devuelve el ID previo. La entrega es al menos una vez dentro
+del plazo de retención.
+
+El formato firmado del sobre v1 se conserva. La autenticación del relay
+usa un dominio separado. Los nombres de adjuntos admiten ASCII con letras,
+números, espacios internos, punto, guion y guion bajo. Se rechazan nombres
+reservados, separadores de ruta y terminaciones en punto o espacio.

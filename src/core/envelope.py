@@ -22,19 +22,15 @@ la misma clave AES-256, y puede descifrar. Verifica la firma con la clave
 Ed25519 pública del remitente (que debe conocer de antemano, p. ej. porque
 lo tiene como contacto).
 
-Nota honesta: al usar una clave efímera nueva por mensaje se consigue
-secreto hacia adelante por mensaje, pero esto NO es un "double ratchet"
-como el protocolo Signal (no hay recuperación tras compromiso de claves a
-mitad de conversación, ni tantos matices de seguridad de sesión). Es una
-construcción ECIES razonable para un sistema de mensajería tipo email
-cifrado, pero debe auditarse antes de proteger información realmente
-sensible, como indica docs/seguridad.md.
+Comprometer la clave estática X25519 del receptor permite descifrar
+sobres históricos capturados. No hay ratchet ni recuperación tras compromiso.
 """
 
 from __future__ import annotations
 
 import base64
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -45,8 +41,11 @@ from cryptography.hazmat.primitives import serialization
 from ..crypto import symmetric
 from ..crypto.kdf import derive_shared_key
 from ..crypto.keys import Identity, PublicBundle
+from .auth import check_bundle, decode
 
 PROTOCOL_VERSION = 1
+MAX_PLAINTEXT = 256 * 1024
+MAX_CIPHERTEXT = MAX_PLAINTEXT + 16
 
 
 def _b64(data: bytes) -> str:
@@ -119,6 +118,33 @@ class Envelope:
         )
 
 
+def safe_filename(name: str) -> bool:
+    return (
+        bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,149}", name))
+        and not name.endswith((".", " "))
+        and name.split(".")[0].upper() not in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(10)), *(f"LPT{i}" for i in range(10))}
+    )
+
+
+def validate_envelope(envelope: Envelope) -> None:
+    if envelope.version != PROTOCOL_VERSION:
+        raise ValueError("Versión de sobre incompatible")
+    if any(not re.fullmatch(r"[a-f0-9]{64}", fp) for fp in (envelope.sender_fp, envelope.recipient_fp)):
+        raise ValueError("Huella inválida")
+    decode(envelope.ephemeral_public, 32)
+    decode(envelope.nonce, 12)
+    decode(envelope.signature, 64)
+    if len(envelope.ciphertext) > 4 * ((MAX_CIPHERTEXT + 2) // 3):
+        raise ValueError("Sobre demasiado grande")
+    raw = base64.b64decode(envelope.ciphertext, validate=True)
+    if not 16 <= len(raw) <= MAX_CIPHERTEXT or _b64(raw) != envelope.ciphertext:
+        raise ValueError("Ciphertext inválido")
+    if datetime.fromisoformat(envelope.timestamp).utcoffset() is None:
+        raise ValueError("El timestamp requiere zona horaria")
+    if envelope.filename is not None and not safe_filename(envelope.filename):
+        raise ValueError("Nombre de adjunto inválido")
+
+
 def seal_message(
     sender: Identity,
     recipient: PublicBundle,
@@ -129,6 +155,9 @@ def seal_message(
     (con su clave privada) podrá descifrarlo, y cualquiera que conozca la
     clave pública del remitente podrá verificar que lo envió él."""
 
+    check_bundle(recipient)
+    if len(plaintext) > MAX_PLAINTEXT or (filename is not None and not safe_filename(filename)):
+        raise ValueError("Adjunto inválido o mensaje demasiado grande")
     ephemeral_private = X25519PrivateKey.generate()
     ephemeral_public_bytes = ephemeral_private.public_key().public_bytes(
         encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw
@@ -169,20 +198,21 @@ def open_message(recipient: Identity, sender: PublicBundle, envelope: Envelope) 
         raise TamperedMessageError("El remitente indicado no coincide con el sobre.")
 
     try:
-        sender.ed25519_key().verify(_unb64(envelope.signature), envelope._signable_bytes())
-    except InvalidSignature as exc:
+        check_bundle(sender)
+        sender.ed25519_key().verify(decode(envelope.signature, 64), envelope._signable_bytes())
+    except (InvalidSignature, ValueError) as exc:
         raise TamperedMessageError(
             "Firma inválida: el mensaje fue alterado o no proviene de quien dice."
         ) from exc
 
-    ephemeral_public = _unb64(envelope.ephemeral_public)
     from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PublicKey
-
-    shared_secret = recipient.x25519_private.exchange(X25519PublicKey.from_public_bytes(ephemeral_public))
-    aes_key = derive_shared_key(shared_secret)
 
     associated_data = f"{envelope.sender_fp}->{envelope.recipient_fp}".encode("utf-8")
     try:
+        validate_envelope(envelope)
+        ephemeral_public = decode(envelope.ephemeral_public, 32)
+        shared_secret = recipient.x25519_private.exchange(X25519PublicKey.from_public_bytes(ephemeral_public))
+        aes_key = derive_shared_key(shared_secret)
         plaintext = symmetric.decrypt(
             aes_key, _unb64(envelope.nonce), _unb64(envelope.ciphertext), associated_data
         )
